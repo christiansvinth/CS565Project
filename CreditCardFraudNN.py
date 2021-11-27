@@ -46,18 +46,18 @@ class RemoteCacheDataset(Dataset):
     def __init__(self, *tensors):
         # set client for memcached
         # this sets the port to 11211 and also crucially adds a serializer
-        self.client =  base.Client("localhost", serde=serde.pickle_serde) # client connection gets set up with default values for now
+        self.client =  base.Client(("localhost", 11211), serde=serde.pickle_serde) # client connection gets set up with default values for now
         self.shadow_cache = set()
         self.tensors = tensors
         self.size = tensors[0].size(0)
         #print(tensors[])
         x = tuple(tensor[0] for tensor in self.tensors)
-        print(x[0])
+
         # initially seed memcached server with X number of values
         for i in range(32):
             self._write_cache(i, [tensors[0][i].tolist(), tensors[1][i].tolist()])
             self.shadow_cache.add(i)
-            break
+            #break
     def __getitem__(self, index):
         return self._query_cache(index)
     
@@ -65,16 +65,22 @@ class RemoteCacheDataset(Dataset):
         return self.size
     
     def _query_cache(self, index):
-        result = self.client.get(index)
+        result = self.client.get(str(index))
         
         if result is None:
-            result = self.client.get(random.sample(self.shadow_cache, 1))
-            key_to_remove = random.sample(self.shadow_cache, 1)
+            key_to_get = str(random.sample(self.shadow_cache, 1)[0])
+            #print(key_to_get)
+            result = self.client.get(key_to_get)
+            key_to_remove = random.sample(self.shadow_cache, 1)[0]
+            #print(key_to_remove)
             self.shadow_cache.remove(key_to_remove)
-            self.client.delete(key_to_remove)
+            self.client.delete(str(key_to_remove))
             self._write_cache(index, [self.tensors[0][index].tolist(), self.tensors[1][index].tolist()])
+            self.shadow_cache.add(index)
         # result should now be in the form of a list with data as first item and output as second
-        item = tuple([torch.as_tensor(result[0]), torch.as_tensor[result[1]]])
+
+        item = tuple([torch.as_tensor(result[0]), torch.as_tensor(result[1])])
+
         return item
     
     def _write_cache(self, index, item):
@@ -106,17 +112,18 @@ class binaryClassification(nn.Module):
         x = self.layer_out(x)
         
         return x
+
 def binary_acc(y_pred, y_test):
     y_pred_tag = torch.round(torch.sigmoid(y_pred))
 
-    correct_results_sum = (y_pred_tag == y_test).sum().float()
+    correct_results_sum = (y_pred_tag == y_test).sum()
     acc = correct_results_sum/y_test.shape[0]
     acc = torch.round(acc * 100)
     
     return acc
     
 def train_model():
-	num_epochs = 100
+	num_epochs = 10
 	minibatch_size = 32
 	learning_rate = 1e-3
 	
@@ -124,7 +131,7 @@ def train_model():
 	transactionData = cc_data.drop(['Time'], axis=1)
 	transactionData['Amount'] = StandardScaler().fit_transform(transactionData['Amount'].values.reshape(-1, 1))
 	
-	model = binaryClassification().double()
+	model = binaryClassification()
 	
 	X = transactionData.drop("Class", axis=1).values
 	y = transactionData['Class'].values
@@ -149,6 +156,7 @@ def train_model():
 	history['test_loss'] = []
 	model.train()
 	for e in range(1, num_epochs+1):
+		print(e)
 		epoch_loss = 0
 		epoch_acc = 0
 		for X_batch, y_batch in train_loader:
@@ -173,13 +181,11 @@ def train_model():
 	with torch.no_grad():
 		for X_batch in test_loader:
 			#print(X_batch)
-			y_test_pred = model(X_batch[0])
+			y_test_pred = model(X_batch[0].float())
 			y_test_pred = torch.sigmoid(y_test_pred)
 			y_pred_tag = torch.round(y_test_pred)
 			y_pred_list.append(y_pred_tag.cpu().numpy())
 	y_pred_list = [a.squeeze().tolist() for a in y_pred_list]
-	print(classification_report(y_test, y_pred_list))
-	print(confusion_matrix(y_test, y_pred_list))
 
 
 train_model()
