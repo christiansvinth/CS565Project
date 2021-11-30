@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import argparse
 import torch
 from torch import optim
 import torch.nn as nn
@@ -11,22 +12,39 @@ from pymemcache import serde
 from torch.utils.data.sampler import Sampler
 from torch.utils.data.dataset import Dataset
 import random
+import time
 from torch.utils.data import TensorDataset, DataLoader
 from sklearn.metrics import classification_report, confusion_matrix
 
+CSV_PATH = "data/creditcard.csv"
 
-'''class RemoteCache:
-    def __init__(self):
-        self.client =  base.Client(("local_host", 11211)) # client connection gets set up with default values for now
-        
-    def _query_server(self, data_id):
-        pass
-    def sampler(self):'''
-        
+
+
+parser = argparse.ArgumentParser(description="Pytorch Profiled training on credit card fraud data")
+parser.add_argument('--epochs', '-e', default=10, type=int, help='Number of epochs to run')
+parser.add_argument('--suffix', default='0', type=str, help='Suffix for log file names')
+parser.add_argument('--eval', action='store_true', default=False, help='Enable evaluation')
+parser.add_argument('--batch_size', default=32, type=int, help='Batch Size for NN Training')
+args = parser.parse_args()
+
+
+#Profiling Setup
+
+from profiler_utils import DataStallProfiler
+
+
+GLOBAL_DATA_PROFILER = DataStallProfiler(args)
+compute_time_list = []
+data_time_list = []
+
+
+
 class RemoteCacheSampler(Sampler):
     def __init__(self, dataset):
         # not efficient but keep copy of dataset in sampler
         self.dataset = dataset
+        
+        
         
         # create generator, which allows us to iterate over the dataset once and only once
         seed = int(torch.empty((), dtype=torch.int64).random_().item())
@@ -50,11 +68,13 @@ class RemoteCacheDataset(Dataset):
         self.shadow_cache = set()
         self.tensors = tensors
         self.size = tensors[0].size(0)
+        self.GLOBAL_CACHE_HITS = 0
+        self.GLOBAL_CACHE_MISSES = 0
         #print(tensors[])
         x = tuple(tensor[0] for tensor in self.tensors)
 
         # initially seed memcached server with X number of values
-        for i in range(32):
+        for i in range(4096):
             self._write_cache(i, [tensors[0][i].tolist(), tensors[1][i].tolist()])
             self.shadow_cache.add(i)
             #break
@@ -77,8 +97,11 @@ class RemoteCacheDataset(Dataset):
             self.client.delete(str(key_to_remove))
             self._write_cache(index, [self.tensors[0][index].tolist(), self.tensors[1][index].tolist()])
             self.shadow_cache.add(index)
+            self.GLOBAL_CACHE_MISSES += 1
         # result should now be in the form of a list with data as first item and output as second
 
+        else:
+            self.GLOBAL_CACHE_HITS += 1
         item = tuple([torch.as_tensor(result[0]), torch.as_tensor(result[1])])
 
         return item
@@ -89,7 +112,7 @@ class RemoteCacheDataset(Dataset):
         #print(index, item)
         self.client.set(str(index), item)
 
-CSV_PATH = "data/creditcard.csv"
+
 
 class binaryClassification(nn.Module):
     def __init__(self):
@@ -123,15 +146,24 @@ def binary_acc(y_pred, y_test):
     return acc
     
 def train_model():
-	num_epochs = 10
-	minibatch_size = 32
+
+	# Initialize timing tools
+	start_full = time.time()
+	time_stat = []
+	start = time.time()
+	
+	# Set Parameters and Create Model
+	num_epochs = args.epochs
+	minibatch_size = args.batch_size
 	learning_rate = 1e-3
 	
+	model = binaryClassification()
+
+	# Load data
 	cc_data = pd.read_csv(CSV_PATH)
 	transactionData = cc_data.drop(['Time'], axis=1)
 	transactionData['Amount'] = StandardScaler().fit_transform(transactionData['Amount'].values.reshape(-1, 1))
 	
-	model = binaryClassification()
 	
 	X = transactionData.drop("Class", axis=1).values
 	y = transactionData['Class'].values
@@ -151,31 +183,88 @@ def train_model():
 	
 	criterion = nn.BCEWithLogitsLoss()
 	optimizer = optim.Adam(model.parameters(), learning_rate)
-	history = {}
-	history['train_loss'] = []
-	history['test_loss'] = []
-	model.train()
+	
+#	history = {}
+#	history['train_loss'] = []
+#	history['test_loss'] = []
+	
+	total_time = AverageMeter()
+	
 	for e in range(1, num_epochs+1):
-		print(e)
-		epoch_loss = 0
-		epoch_acc = 0
-		for X_batch, y_batch in train_loader:
-			#X_batch, y_batch = X_batch.to("cpu"), y_batch.to("cpu")
-			optimizer.zero_grad()
-			
-			y_pred = model(X_batch)
-			
-			loss = criterion(y_pred, y_batch.unsqueeze(1).float())
-			acc = binary_acc(y_pred, y_batch.unsqueeze(1))
-			
-			loss.backward()
-			optimizer.step()
-			
-			epoch_loss += loss.item()
-			epoch_acc += acc.item()
-			
+		
+		start_ep = time.time()
+		
+		avg_train_time = train_epoch(train_loader, model, criterion, optimizer, binary_acc, e)
+		
+		total_time.update(avg_train_time)
+		
+		dur_ep = time.time() - start_ep
+		
+		print("EPOCH DURATION + {}".format(dur_ep))
+		time_stat.append(dur_ep)
+	
+	dur_full = time.time() - start_full
+	
+	print("Cache Hit Rate -- {}".format(train_data.GLOBAL_CACHE_HITS/(train_data.GLOBAL_CACHE_HITS+train_data.GLOBAL_CACHE_MISSES)))
+	GLOBAL_DATA_PROFILER.stop_profiler()
+	
+		
+	
+def train_epoch(train_loader, model, criterion, optimizer, accuracy_function, e):
+	batch_time = AverageMeter()
+	data_time = AverageMeter()
+	losses = AverageMeter()
+	
+	model.train()
+	end = time.time()
+	GLOBAL_DATA_PROFILER.start_data_tick()
+	dataset_time = compute_time = 0
+	
+	epoch_loss = 0
+	epoch_acc = 0
+	for X_batch, y_batch in train_loader:
+		# Compute data loading time
+		data_time.update(time.time() - end)
+		dataset_time += (time.time() - end)
+		compute_start = time.time()
+		
+		# Switch to tracking compute time
+		GLOBAL_DATA_PROFILER.stop_data_tick()
+		GLOBAL_DATA_PROFILER.start_compute_tick()
+		
+		
+		y_pred = model(X_batch)
+		
+		
+		loss = criterion(y_pred, y_batch.unsqueeze(1).float())
+		acc = accuracy_function(y_pred, y_batch.unsqueeze(1))
+		
+		optimizer.zero_grad()
+				
+		loss.backward()
+		optimizer.step()
+		
+		epoch_loss += loss.item()
+		epoch_acc += acc.item()
+		
+		# Swtich to tracking data loading time
+		GLOBAL_DATA_PROFILER.stop_compute_tick()
+		GLOBAL_DATA_PROFILER.start_data_tick()
+		
+		compute_time += (time.time() - compute_start)
+		batch_time.update(time.time() - end)
+		
+		end = time.time()
+	
+	data_time_list.append(dataset_time)
+	compute_time_list.append(compute_time)
+	print(f'Epoch {e+0:03}: | Loss: {epoch_loss/len(train_loader):.5f} | Acc: {epoch_acc/len(train_loader):.3f}')
+	
+	return batch_time.avg
 
-		print(f'Epoch {e+0:03}: | Loss: {epoch_loss/len(train_loader):.5f} | Acc: {epoch_acc/len(train_loader):.3f}')
+	
+    
+def evaluate_model(model):
 	y_pred_list = []
 	model.eval()
 	with torch.no_grad():
@@ -187,5 +276,24 @@ def train_model():
 			y_pred_list.append(y_pred_tag.cpu().numpy())
 	y_pred_list = [a.squeeze().tolist() for a in y_pred_list]
 
+class AverageMeter(object):
+	"""Computes and stores the average and current value"""
+	def __init__(self):
+		self.reset()
+
+	def reset(self):
+		self.val = 0
+		self.avg = 0
+		self.sum = 0
+		self.count = 0
+
+	def update(self, val, n=1):
+		self.val = val
+		self.sum += val * n
+		self.count += n
+		self.avg = self.sum / self.count
+
 
 train_model()
+
+
