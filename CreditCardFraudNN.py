@@ -15,6 +15,7 @@ import random
 import time
 from torch.utils.data import TensorDataset, DataLoader
 from sklearn.metrics import classification_report, confusion_matrix
+from LRUCache import *
 
 CSV_PATH = "data/creditcard.csv"
 
@@ -39,12 +40,11 @@ data_time_list = []
 
 
 
+
 class RemoteCacheSampler(Sampler):
     def __init__(self, dataset):
         # not efficient but keep copy of dataset in sampler
         self.dataset = dataset
-        
-        
         
         # create generator, which allows us to iterate over the dataset once and only once
         seed = int(torch.empty((), dtype=torch.int64).random_().item())
@@ -61,43 +61,82 @@ class RemoteCacheSampler(Sampler):
         return len(self.dataset)
     
 class RemoteCacheDataset(Dataset):
-    def __init__(self, *tensors):
+    """
+    The RemoteCacheDataset simulates a standard cache pulling data from disk, as the entirety
+    of the dataset can successfully fit in memory. The RemoteCacheDataset maintains a small
+    "shadow cache" which acts as a standard cache would on a system using a larger dataset.
+    When a requested item is not in the shadow cache and must be "retreived from disk", a
+    preset latency is added to retrieving that data item.
+    """
+    def __init__(self, *tensors, eviction_method='lru'):
+        known_eviction_methods = ['random-replace', 'lru', 'never-evict']
+        
+        
+        if eviction_method not in known_eviction_methods:
+            raise ValueError("Unknown method {}. Valid options are {}".format(eviction_method, known_eviction_methods))
         # set client for memcached
         # this sets the port to 11211 and also crucially adds a serializer
         self.client =  base.Client(("localhost", 11211), serde=serde.pickle_serde) # client connection gets set up with default values for now
-        self.shadow_cache = set()
         self.tensors = tensors
         self.size = tensors[0].size(0)
+        CACHE_SIZE = len(self.tensors[0]) // 3
+        self.shadow_cache = SimpleCacheQueue(CACHE_SIZE)
         self.GLOBAL_CACHE_HITS = 0
         self.GLOBAL_CACHE_MISSES = 0
-        #print(tensors[])
+        self.DISK_LATENCY = .01
         x = tuple(tensor[0] for tensor in self.tensors)
+        self.eviction_method = eviction_method
 
         # initially seed memcached server with X number of values
-        for i in range(4096):
+        print(CACHE_SIZE)
+        for i in range(CACHE_SIZE):
             self._write_cache(i, [tensors[0][i].tolist(), tensors[1][i].tolist()])
-            self.shadow_cache.add(i)
+            self.shadow_cache.insert(i)
             #break
+        print(len(self.shadow_cache.lookup))
     def __getitem__(self, index):
         return self._query_cache(index)
     
+
     def __len__(self):
         return self.size
     
     def _query_cache(self, index):
+    
+		# If sample was already in cache
         result = self.client.get(str(index))
         
+
         if result is None:
-            key_to_get = str(random.sample(self.shadow_cache, 1)[0])
-            #print(key_to_get)
-            result = self.client.get(key_to_get)
-            key_to_remove = random.sample(self.shadow_cache, 1)[0]
-            #print(key_to_remove)
-            self.shadow_cache.remove(key_to_remove)
-            self.client.delete(str(key_to_remove))
-            self._write_cache(index, [self.tensors[0][index].tolist(), self.tensors[1][index].tolist()])
-            self.shadow_cache.add(index)
+            if self.eviction_method is 'lru':
+                # Fetch the data point "from disk"
+                #time.sleep(self.DISK_LATENCY)
+                self._write_cache(index, [self.tensors[0][index].tolist(), self.tensors[1][index].tolist()])
+                self.shadow_cache.insert(index)
+                result = self.client.get(str(index))
+                assert result is not None
+
+                key_to_remove = self.shadow_cache.evict()
+                self.client.delete(str(key_to_remove))
+                
+            elif self.eviction_method is 'random-replace':
+                #time.sleep(self.DISK_LATENCY*0.25) # Assume there will be some latency/overhead for the background fetching process
+                replacement_sample_index = str(random.sample(self.shadow_cache.lookup, 1)[0])
+                result = self.client.get(str(replacement_sample_index))
+                
+                self.shadow_cache.evict(replacement_sample_index)
+                self.client.delete(str(replacement_sample_index))
+                
+                self._write_cache(index, [self.tensors[0][index].tolist(), self.tensors[1][index].tolist()])
+                self.shadow_cache.insert(index)
+                
+            elif self.eviction_method is 'never-evict':
+                #time.sleep(self.DISK_LATENCY)
+                # Directly pull the missing sample "from disk"
+                result = [self.tensors[0][index].tolist(), self.tensors[1][index].tolist()]
+                
             self.GLOBAL_CACHE_MISSES += 1
+            
         # result should now be in the form of a list with data as first item and output as second
 
         else:
@@ -111,6 +150,7 @@ class RemoteCacheDataset(Dataset):
         # not the client, however that is a limitation of using memcached
         #print(index, item)
         self.client.set(str(index), item)
+        
 
 
 
