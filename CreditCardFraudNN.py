@@ -189,68 +189,64 @@ def binary_acc(y_pred, y_test):
     return acc
     
 def train_model():
-
-	# Initialize timing tools
-	start_full = time.time()
-	time_stat = []
-	start = time.time()
-	
-	# Set Parameters and Create Model
-	num_epochs = args.epochs
-	minibatch_size = args.batch_size
-	learning_rate = 1e-3
-	
-	model = binaryClassification()
-
-	# Load data
-	cc_data = pd.read_csv(CSV_PATH)
-	transactionData = cc_data.drop(['Time'], axis=1)
-	transactionData['Amount'] = StandardScaler().fit_transform(transactionData['Amount'].values.reshape(-1, 1))
-	
-	
-	X = transactionData.drop("Class", axis=1).values
-	y = transactionData['Class'].values
-	
-	X_tensor = torch.as_tensor(X)
-	y_tensor = torch.as_tensor(y)
-	
-	X_train, X_test, y_train, y_test = train_test_split(X_tensor, y_tensor, test_size=0.2, random_state=1)
-	
-	train_data = RemoteCacheDataset(X_train, y_train, eviction_method=args.eviction_method)
-	test_data = TensorDataset(X_test)
-	train_sampler = RemoteCacheSampler(train_data)
-	train_loader = DataLoader(dataset=train_data, batch_size=minibatch_size,
+    # Initialize timing tools
+    start_full = time.time()
+    time_stat = []
+    start = time.time()
+    
+    # Set Parameters and Create Model
+    num_epochs = args.epochs
+    minibatch_size = args.batch_size
+    learning_rate = 1e-3
+    
+    model = binaryClassification()
+    
+    # Load data
+    cc_data = pd.read_csv(CSV_PATH)
+    transactionData = cc_data.drop(['Time'], axis=1)
+    transactionData['Amount'] = StandardScaler().fit_transform(transactionData['Amount'].values.reshape(-1, 1))
+    
+    
+    X = transactionData.drop("Class", axis=1).values
+    y = transactionData['Class'].values
+    
+    X_tensor = torch.as_tensor(X)
+    y_tensor = torch.as_tensor(y)
+    
+    X_train, X_test, y_train, y_test = train_test_split(X_tensor, y_tensor, test_size=0.2, random_state=1)
+    
+    train_data = RemoteCacheDataset(X_train, y_train, eviction_method=args.eviction_method)
+    test_data = TensorDataset(X_test)
+    train_sampler = RemoteCacheSampler(train_data)
+    train_loader = DataLoader(dataset=train_data, batch_size=minibatch_size,
                           sampler=train_sampler)
+    
+    test_loader = DataLoader(dataset=test_data, batch_size=1)
+    
+    criterion = nn.BCEWithLogitsLoss()
+    optimizer = optim.Adam(model.parameters(), learning_rate)
+    
+    total_time = AverageMeter()
+    
+    for e in range(1, num_epochs+1):
+        
+        start_ep = time.time()
+        
+        avg_train_time = train_epoch(train_loader, model, criterion, optimizer, binary_acc, e)
+        
+        total_time.update(avg_train_time)
+        
+        dur_ep = time.time() - start_ep
+        
+        print("EPOCH DURATION + {}".format(dur_ep))
+        time_stat.append(dur_ep)
 	
-	test_loader = DataLoader(dataset=test_data, batch_size=1)
+    dur_full = time.time() - start_full
+    print("Cache Hit Rate -- {}".format(train_data.GLOBAL_CACHE_HITS/(train_data.GLOBAL_CACHE_HITS+train_data.GLOBAL_CACHE_MISSES)))
+    evaluate_model(model, test_loader, y_test)
+    GLOBAL_DATA_PROFILER.stop_profiler()
 	
-	criterion = nn.BCEWithLogitsLoss()
-	optimizer = optim.Adam(model.parameters(), learning_rate)
-	
-#	history = {}
-#	history['train_loss'] = []
-#	history['test_loss'] = []
-	
-	total_time = AverageMeter()
-	
-	for e in range(1, num_epochs+1):
-		
-		start_ep = time.time()
-		
-		avg_train_time = train_epoch(train_loader, model, criterion, optimizer, binary_acc, e)
-		
-		total_time.update(avg_train_time)
-		
-		dur_ep = time.time() - start_ep
-		
-		print("EPOCH DURATION + {}".format(dur_ep))
-		time_stat.append(dur_ep)
-	
-	dur_full = time.time() - start_full
-	
-	print("Cache Hit Rate -- {}".format(train_data.GLOBAL_CACHE_HITS/(train_data.GLOBAL_CACHE_HITS+train_data.GLOBAL_CACHE_MISSES)))
-	GLOBAL_DATA_PROFILER.stop_profiler()
-	
+    
 		
 	
 def train_epoch(train_loader, model, criterion, optimizer, accuracy_function, e):
@@ -307,17 +303,19 @@ def train_epoch(train_loader, model, criterion, optimizer, accuracy_function, e)
 
 	
     
-def evaluate_model(model):
-	y_pred_list = []
-	model.eval()
-	with torch.no_grad():
-		for X_batch in test_loader:
-			#print(X_batch)
-			y_test_pred = model(X_batch[0].float())
-			y_test_pred = torch.sigmoid(y_test_pred)
-			y_pred_tag = torch.round(y_test_pred)
-			y_pred_list.append(y_pred_tag.cpu().numpy())
-	y_pred_list = [a.squeeze().tolist() for a in y_pred_list]
+def evaluate_model(model, test_loader, y_test):
+    y_pred_list = []
+    model.eval()
+    with torch.no_grad():
+        for X_batch in test_loader:
+            #print(X_batch)
+            y_test_pred = model(X_batch[0].float())
+            y_test_pred = torch.sigmoid(y_test_pred)
+            y_pred_tag = torch.round(y_test_pred)
+            y_pred_list.append(y_pred_tag.cpu().numpy())
+    y_pred_list = [a.squeeze().tolist() for a in y_pred_list]
+    print(classification_report(y_test, y_pred_list))
+    print(confusion_matrix(y_test, y_pred_list))
 
 class AverageMeter(object):
 	"""Computes and stores the average and current value"""
