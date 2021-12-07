@@ -26,6 +26,8 @@ parser.add_argument('--epochs', '-e', default=10, type=int, help='Number of epoc
 parser.add_argument('--suffix', default='0', type=str, help='Suffix for log file names')
 parser.add_argument('--eval', action='store_true', default=False, help='Enable evaluation')
 parser.add_argument('--batch_size', default=32, type=int, help='Batch Size for NN Training')
+parser.add_argument('--log_path', default="", type=str, help="Path to directory for log files")
+parser.add_argument('--eviction_method', default='lru', type=str, help="Eviction Strategy to use")
 args = parser.parse_args()
 
 
@@ -79,7 +81,7 @@ class RemoteCacheDataset(Dataset):
         self.client =  base.Client(("localhost", 11211), serde=serde.pickle_serde) # client connection gets set up with default values for now
         self.tensors = tensors
         self.size = tensors[0].size(0)
-        CACHE_SIZE = len(self.tensors[0]) // 3
+        CACHE_SIZE = len(self.tensors[0]) // 4
         self.shadow_cache = SimpleCacheQueue(CACHE_SIZE)
         self.GLOBAL_CACHE_HITS = 0
         self.GLOBAL_CACHE_MISSES = 0
@@ -88,7 +90,8 @@ class RemoteCacheDataset(Dataset):
         self.eviction_method = eviction_method
 
         # initially seed memcached server with X number of values
-        print(CACHE_SIZE)
+        print("Dataset length: ", len(self.tensors[0]))
+        print("Cache size: ", CACHE_SIZE)
         for i in range(CACHE_SIZE):
             self._write_cache(i, [tensors[0][i].tolist(), tensors[1][i].tolist()])
             self.shadow_cache.insert(i)
@@ -108,7 +111,7 @@ class RemoteCacheDataset(Dataset):
         
 
         if result is None:
-            if self.eviction_method is 'lru':
+            if self.eviction_method == 'lru':
                 # Fetch the data point "from disk"
                 #time.sleep(self.DISK_LATENCY)
                 self._write_cache(index, [self.tensors[0][index].tolist(), self.tensors[1][index].tolist()])
@@ -119,9 +122,9 @@ class RemoteCacheDataset(Dataset):
                 key_to_remove = self.shadow_cache.evict()
                 self.client.delete(str(key_to_remove))
                 
-            elif self.eviction_method is 'random-replace':
+            elif self.eviction_method == 'random-replace':
                 #time.sleep(self.DISK_LATENCY*0.25) # Assume there will be some latency/overhead for the background fetching process
-                replacement_sample_index = str(random.sample(self.shadow_cache.lookup, 1)[0])
+                replacement_sample_index = str(random.sample(list(self.shadow_cache.lookup), 1)[0])
                 result = self.client.get(str(replacement_sample_index))
                 
                 self.shadow_cache.evict(replacement_sample_index)
@@ -130,11 +133,11 @@ class RemoteCacheDataset(Dataset):
                 self._write_cache(index, [self.tensors[0][index].tolist(), self.tensors[1][index].tolist()])
                 self.shadow_cache.insert(index)
                 
-            elif self.eviction_method is 'never-evict':
+            elif self.eviction_method == 'never-evict':
                 #time.sleep(self.DISK_LATENCY)
                 # Directly pull the missing sample "from disk"
                 result = [self.tensors[0][index].tolist(), self.tensors[1][index].tolist()]
-                
+
             self.GLOBAL_CACHE_MISSES += 1
             
         # result should now be in the form of a list with data as first item and output as second
@@ -213,7 +216,7 @@ def train_model():
 	
 	X_train, X_test, y_train, y_test = train_test_split(X_tensor, y_tensor, test_size=0.2, random_state=1)
 	
-	train_data = RemoteCacheDataset(X_train, y_train)
+	train_data = RemoteCacheDataset(X_train, y_train, eviction_method=args.eviction_method)
 	test_data = TensorDataset(X_test)
 	train_sampler = RemoteCacheSampler(train_data)
 	train_loader = DataLoader(dataset=train_data, batch_size=minibatch_size,

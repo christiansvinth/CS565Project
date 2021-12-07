@@ -37,12 +37,12 @@ class DataStallProfiler():
         self.args = args
         if self.args.suffix is None:
             self.args.suffix = str(self.args.local_rank)
-        self.log_outfile = 'stdoutlog-' + self.args.suffix + '.log'
-        self.err_outfile = 'stderrlog-' + self.args.suffix + '.log'
-        pout_file = 'profile-'  + self.args.suffix + '.json'
+        self.log_outfile = self.args.log_path + 'stdoutlog-' + self.args.suffix + '.log'
+        self.err_outfile = self.args.log_path + 'stderrlog-' + self.args.suffix + '.log'
+        pout_file = self.args.log_path + 'profile-'  + self.args.suffix + '.json'
         self.pout = open(pout_file, "w")
 
-        time_outfile = 'time-' + self.args.suffix + '.csv'
+        time_outfile = self.args.log_path + 'time-' + self.args.suffix + '.csv'
         self.time_logger = open(time_outfile, 'w')
         self.time_logger.write("Iter, Data time, Compute time \n")
         self.data_time = 0
