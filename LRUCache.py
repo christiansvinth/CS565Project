@@ -23,22 +23,25 @@ class SimpleCacheQueue():
     def evict(self, index_to_remove=None):
         if index_to_remove is None:
             # Remove tail node
-            if(self.tail is None):
-                print("No tail!")
             old_tail = self.tail
             old_index = self.tail.index
             self.tail = self.tail.left
             if self.tail:
                 self.tail.right = None
-                
-            self.lookup.pop(old_tail.index)
+            try:
+                self.lookup.pop(int(old_index))
+            except:
+                pass
             del old_tail
         else:
-            victim = self.lookup(index)
-            victim.left.right = victim.right
-            victim.right.left = victim.left
-            self.lookup.pop(index)
+            victim = self.lookup[int(index_to_remove)]
+            if victim.left is not None:
+                victim.left.right = victim.right
+            if victim.right is not None:
+                victim.right.left = victim.left
+            self.lookup.pop(int(index_to_remove))
             del victim
+            return index_to_remove
             
         return old_index
         
@@ -46,8 +49,7 @@ class SimpleCacheQueue():
         new_node = Node(index)
         if self.head is None:
             self.head = self.tail = new_node
-            #self.head.right = self.tail
-            #self.tail.left = self.head
+
         else:
             # A newly inserted item goes to head of cache queue
             self.head.left = new_node
@@ -55,7 +57,7 @@ class SimpleCacheQueue():
             self.head = self.head.left
             
         
-        self.lookup[new_node.index] = new_node
+        self.lookup[index] = new_node
         assert self.tail is not None
 
         
