@@ -7,8 +7,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
-from pymemcache.client import base
-from pymemcache import serde
 from torch.utils.data.sampler import Sampler
 from torch.utils.data.dataset import Dataset
 import random
@@ -16,6 +14,7 @@ import time
 from torch.utils.data import TensorDataset, DataLoader
 from sklearn.metrics import classification_report, confusion_matrix
 from LRUCache import *
+from RemoteCache import *
 
 CSV_PATH = "data/creditcard.csv"
 
@@ -39,123 +38,6 @@ from profiler_utils import DataStallProfiler
 GLOBAL_DATA_PROFILER = DataStallProfiler(args)
 compute_time_list = []
 data_time_list = []
-
-
-
-
-class RemoteCacheSampler(Sampler):
-    def __init__(self, dataset):
-        # not efficient but keep copy of dataset in sampler
-        self.dataset = dataset
-        
-        # create generator, which allows us to iterate over the dataset once and only once
-        seed = int(torch.empty((), dtype=torch.int64).random_().item())
-        self.generator=torch.Generator()
-        self.generator.manual_seed(seed)
-        
-    def __iter__(self):
-        # should return an iterator over dataset
-        for g in torch.randperm(len(self.dataset), generator=self.generator).tolist():
-            yield g#self.dataset[g]
-            
-    def __len__(self):
-        # returns number of rows in dataframe
-        return len(self.dataset)
-    
-class RemoteCacheDataset(Dataset):
-    """
-    The RemoteCacheDataset simulates a standard cache pulling data from disk, as the entirety
-    of the dataset can successfully fit in memory. The RemoteCacheDataset maintains a small
-    "shadow cache" which acts as a standard cache would on a system using a larger dataset.
-    When a requested item is not in the shadow cache and must be "retreived from disk", a
-    preset latency is added to retrieving that data item.
-    """
-    def __init__(self, *tensors, eviction_method='lru'):
-        known_eviction_methods = ['random-replace', 'lru', 'never-evict']
-        
-        
-        if eviction_method not in known_eviction_methods:
-            raise ValueError("Unknown method {}. Valid options are {}".format(eviction_method, known_eviction_methods))
-        # set client for memcached
-        # this sets the port to 11211 and also crucially adds a serializer
-        self.client =  base.Client(("localhost", 11211), serde=serde.pickle_serde) # client connection gets set up with default values for now
-        self.tensors = tensors
-        self.size = tensors[0].size(0)
-        CACHE_SIZE = len(self.tensors[0]) // 4
-        self.shadow_cache = SimpleCacheQueue(CACHE_SIZE)
-        self.GLOBAL_CACHE_HITS = 0
-        self.GLOBAL_CACHE_MISSES = 0
-        self.DISK_LATENCY = .01
-        x = tuple(tensor[0] for tensor in self.tensors)
-        self.eviction_method = eviction_method
-
-        # initially seed memcached server with X number of values
-        print("Dataset length: ", len(self.tensors[0]))
-        print("Cache size: ", CACHE_SIZE)
-        for i in range(CACHE_SIZE):
-            self._write_cache(i, [tensors[0][i].tolist(), tensors[1][i].tolist()])
-            self.shadow_cache.insert(i)
-            #break
-        print(len(self.shadow_cache.lookup))
-    def __getitem__(self, index):
-        return self._query_cache(index)
-    
-
-    def __len__(self):
-        return self.size
-    
-    def _query_cache(self, index):
-    
-		# If sample was already in cache
-        result = self.client.get(str(index))
-        
-
-        if result is None:
-            if self.eviction_method == 'lru':
-                # Fetch the data point "from disk"
-                #time.sleep(self.DISK_LATENCY)
-                self._write_cache(index, [self.tensors[0][index].tolist(), self.tensors[1][index].tolist()])
-                self.shadow_cache.insert(index)
-                result = self.client.get(str(index))
-                assert result is not None
-
-                key_to_remove = self.shadow_cache.evict()
-                self.client.delete(str(key_to_remove))
-                
-            elif self.eviction_method == 'random-replace':
-                #time.sleep(self.DISK_LATENCY*0.25) # Assume there will be some latency/overhead for the background fetching process
-                replacement_sample_index = str(random.sample(list(self.shadow_cache.lookup), 1)[0])
-                result = self.client.get(str(replacement_sample_index))
-                
-                self.shadow_cache.evict(replacement_sample_index)
-                self.client.delete(str(replacement_sample_index))
-                
-                self._write_cache(index, [self.tensors[0][index].tolist(), self.tensors[1][index].tolist()])
-                self.shadow_cache.insert(index)
-                
-            elif self.eviction_method == 'never-evict':
-                #time.sleep(self.DISK_LATENCY)
-                # Directly pull the missing sample "from disk"
-                result = [self.tensors[0][index].tolist(), self.tensors[1][index].tolist()]
-
-            self.GLOBAL_CACHE_MISSES += 1
-            
-        # result should now be in the form of a list with data as first item and output as second
-
-        else:
-            self.GLOBAL_CACHE_HITS += 1
-        item = tuple([torch.as_tensor(result[0]), torch.as_tensor(result[1])])
-
-        return item
-    
-    def _write_cache(self, index, item):
-        # update remote cache.  Ideally this should be done on the server
-        # not the client, however that is a limitation of using memcached
-        #print(index, item)
-        self.client.set(str(index), item)
-        
-
-
 
 class binaryClassification(nn.Module):
     def __init__(self):
@@ -217,9 +99,7 @@ def train_model():
     
     train_data = RemoteCacheDataset(X_train, y_train, eviction_method=args.eviction_method)
     test_data = TensorDataset(X_test)
-    train_sampler = RemoteCacheSampler(train_data)
-    train_loader = DataLoader(dataset=train_data, batch_size=minibatch_size,
-                          sampler=train_sampler)
+    train_loader = DataLoader(dataset=train_data, batch_size=minibatch_size)
     
     test_loader = DataLoader(dataset=test_data, batch_size=1)
     
@@ -272,7 +152,7 @@ def train_epoch(train_loader, model, criterion, optimizer, accuracy_function, e)
 		GLOBAL_DATA_PROFILER.start_compute_tick()
 		
 		
-		y_pred = model(X_batch)
+		y_pred = model(X_batch.float())
 		
 		
 		loss = criterion(y_pred, y_batch.unsqueeze(1).float())
@@ -314,8 +194,11 @@ def evaluate_model(model, test_loader, y_test):
             y_pred_tag = torch.round(y_test_pred)
             y_pred_list.append(y_pred_tag.cpu().numpy())
     y_pred_list = [a.squeeze().tolist() for a in y_pred_list]
+    CR = classification_report(y_test, y_pred_list, output_dict=True)
     print(classification_report(y_test, y_pred_list))
     print(confusion_matrix(y_test, y_pred_list))
+    print(CR['accuracy'])
+    
 
 class AverageMeter(object):
 	"""Computes and stores the average and current value"""
