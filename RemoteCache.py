@@ -26,7 +26,7 @@ class RemoteCacheDataset(Dataset):
             raise ValueError("Unknown method {}. Valid options are {}".format(eviction_method, known_eviction_methods))
         # set client for memcached
         # this sets the port to 11211 and also crucially adds a serializer
-        self.client =  base.Client(("localhost", 11211), serde=serde.pickle_serde) # client connection gets set up with default values for now
+        self.client =  base.Client(("127.0.0.1", 11211), serde=serde.pickle_serde) # client connection gets set up with default values for now
         
         self.X = tensors[0]#[:10000]
         self.y = tensors[1]#[:10000]
@@ -134,7 +134,7 @@ class RemoteCacheDataset(Dataset):
                 #key_to_remove = random.sample(self.shadow_cache, 1)[0]
                 # according to heapq, this is more efficient than explicitly doing a push/pop operation
                 heapq.heappushpop(self.shadow_cache, [largest_value+2, index])
-                self._write_cache(index, [self.tensors[0][index].tolist(), self.tensors[1][index].tolist()])
+                self._write_cache(index, [self.X[index].tolist(), self.y[index].tolist()])
                 
                 # lastly recompute updated cache variance
                 self._compute_cache_variance()
@@ -171,8 +171,8 @@ class RemoteCacheDataset(Dataset):
         # again due to limitations of using memcached, we perform this on the client side
         temp_data = []
         # slow and inefficient way to compute variance, but also easist to proof out
-        for i in range(self.cache_size):
-            temp_data.append(self.tensors[0][i].tolist())
+        for i in range(self.cache_ßsize):
+            temp_data.append(self.X[i].tolist())
 
         temp_data = np.array(temp_data)
         self._cache_variance = np.var(temp_data)
