@@ -9,7 +9,8 @@ from torch.utils.data.dataset import Dataset
 from LRUCache import SimpleCacheQueue
 import random
 import heapq
-    
+import time
+
 class FastCacheDataset(Dataset):
     """
     The RemoteCacheDataset simulates a standard cache pulling data from disk, as the entirety
@@ -18,7 +19,7 @@ class FastCacheDataset(Dataset):
     When a requested item is not in the shadow cache and must be "retreived from disk", a
     preset latency is added to retrieving that data item.
     """
-    def __init__(self, *tensors, eviction_method='lru', data_variance=1):
+    def __init__(self, *tensors, eviction_method='lru', with_latency=False, data_variance=1):
         known_eviction_methods = ['random-replace', 'lru', 'never-evict', 'importance']
         
         
@@ -28,20 +29,21 @@ class FastCacheDataset(Dataset):
         # this sets the port to 11211 and also crucially adds a serializer
         #self.client =  base.Client(("127.0.0.1", 11211), serde=serde.pickle_serde) # client connection gets set up with default values for now
         
-        self.X = tensors[0]#[:10000]
-        self.y = tensors[1]#[:10000]
+        self.X = tensors[0]#[:30000]
+        self.y = tensors[1]#[:30000]
         self.data_shape = self.X[0].shape
         print("X shape: ", self.X.shape)
         print("y shape: ", self.y.shape)
         print("Data Shape: ", self.data_shape)
         
         self.size = len(self.X)
-        CACHE_SIZE = self.size // 4
+        CACHE_SIZE = int(self.size * .6)
         self.cache_size = CACHE_SIZE
         self.shadow_cache = SimpleCacheQueue(CACHE_SIZE)
         self.GLOBAL_CACHE_HITS = 0
         self.GLOBAL_CACHE_MISSES = 0
-        self.DISK_LATENCY = .01
+        self.DISK_LATENCY = .001
+        self.with_latency = with_latency
         #x = tuple(tensor[0] for tensor in self.tensors)
         self.eviction_method = eviction_method
         self.fast_cache = dict()
@@ -57,7 +59,8 @@ class FastCacheDataset(Dataset):
             
             
         # initially seed memcached server with X number of values
-        for i in range(CACHE_SIZE):
+        random_indexes = random.sample(range(self.size), CACHE_SIZE)
+        for i in random_indexes:
             self._write_cache(i, [self.X[i].tolist(), self.y[i].tolist()])
             if self.eviction_method == 'importance':
                 heapq.heappush(self.shadow_cache, [1, i])
@@ -83,7 +86,8 @@ class FastCacheDataset(Dataset):
             hit = False
             if self.eviction_method == 'lru':
                 # Fetch the data point "from disk"
-                #time.sleep(self.DISK_LATENCY)
+                if self.with_latency:
+                    time.sleep(self.DISK_LATENCY)
                 
                 self._write_cache(str(index), [self.X[index].tolist(), self.y[index].tolist()])
                 self.shadow_cache.insert(index)
@@ -94,21 +98,25 @@ class FastCacheDataset(Dataset):
                 self.fast_cache.pop(str(key_to_remove))
                 
             elif self.eviction_method == 'random-replace':
-                #time.sleep(self.DISK_LATENCY*0.25) # Assume there will be some latency/overhead for the background fetching process
-                replacement_sample_index = str(random.sample(list(self.shadow_cache.lookup), 1)[0])
+                if self.with_latency:
+                    time.sleep(self.DISK_LATENCY*0.25) 
+                    # Assume there will be some latency/overhead for the background fetching process
+                #replacement_sample_index = str(random.sample(list(self.shadow_cache.lookup), 1)[0])
+                replacement_sample_index = random.choice(list(self.shadow_cache.lookup.keys()))
                 result = self.fast_cache[str(replacement_sample_index)]
                 
                 if result is None:
                     result = [self.X[int(replacement_sample_index)], self.y[int(replacement_sample_index)]]
                 
                 self.shadow_cache.evict(replacement_sample_index)
-                self.fast_cache.pop[str(replacement_sample_index)]
+                self.fast_cache.pop(str(replacement_sample_index))
                 
                 self._write_cache(index, [self.X[index], self.y[index]])
                 self.shadow_cache.insert(index)
                 
             elif self.eviction_method == 'never-evict':
-                #time.sleep(self.DISK_LATENCY)
+                if self.with_latency:
+                    time.sleep(self.DISK_LATENCY)
                 # Directly pull the missing sample "from disk"
                 result = [self.X[index], self.y[index]]
 
@@ -170,10 +178,6 @@ class FastCacheDataset(Dataset):
         # compute the current variance of the cache
         # ideally this is something the cache server would do, however
         # again due to limitations of using memcached, we perform this on the client side
-        temp_data = []
         # slow and inefficient way to compute variance, but also easist to proof out
-        for i in range(self.cache_ßsize):
-            temp_data.append(self.X[i].tolist())
-
-        temp_data = np.array(temp_data)
+        temp_data = np.asarray([self.X[element[1]].tolist() for element in self.shadow_cache])
         self._cache_variance = np.var(temp_data)

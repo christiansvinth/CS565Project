@@ -16,7 +16,7 @@ from torch.utils.data import TensorDataset, DataLoader
 from torch.optim.lr_scheduler import StepLR
 from sklearn.metrics import classification_report, confusion_matrix
 from LRUCache import *
-from RemoteCache import *
+from FastCache import *
 
 
 parser = argparse.ArgumentParser(description="Pytorch Profiled training on credit card fraud data")
@@ -26,6 +26,7 @@ parser.add_argument('--eval', action='store_true', default=False, help='Enable e
 parser.add_argument('--batch_size', default=64, type=int, help='Batch Size for NN Training')
 parser.add_argument('--log_path', default="", type=str, help="Path to directory for log files")
 parser.add_argument('--eviction_method', default='lru', type=str, help="Eviction Strategy to use")
+parser.add_argument('--with_latency', action='store_true', default=False, help='Enable a latency on disk accesses')
 args = parser.parse_args()
 
 
@@ -63,8 +64,24 @@ class ConvNet(nn.Module):
         x = self.fc2(x)
         output = F.log_softmax(x, dim=1)
         return output
-
-    
+#class ConvNet(nn.Module):
+#    def __init__(self):
+#        super(ConvNet, self).__init__()
+#        self.conv1 = nn.Conv2d(1, 10, kernel_size=5)
+#        self.conv2 = nn.Conv2d(10, 20, kernel_size=5)
+#        self.conv2_drop = nn.Dropout2d()
+#        self.fc1 = nn.Linear(320, 50)
+#        self.fc2 = nn.Linear(50, 10)
+#
+#    def forward(self, x):
+#        x = F.relu(F.max_pool2d(self.conv1(x), 2))
+#        x = F.relu(F.max_pool2d(self.conv2_drop(self.conv2(x)), 2))
+#        x = x.view(-1, 320)
+#        x = F.relu(self.fc1(x))
+#        x = F.dropout(x, training=self.training)
+#        x = self.fc2(x)
+#        return F.log_softmax(x)
+   
 def train_model():
     # Initialize timing tools
     start_full = time.time()
@@ -82,10 +99,11 @@ def train_model():
                                     transform=transform)
     test_dataset = datasets.MNIST('./data', train=False, download=True,
                                     transform=transform)
+
     X_train, y_train = train_dataset.data, train_dataset.targets
     X_test, y_test = test_dataset.data, test_dataset.targets
     
-    train_data = RemoteCacheDataset(X_train, y_train, eviction_method=args.eviction_method)
+    train_data = FastCacheDataset(X_train, y_train, eviction_method=args.eviction_method, with_latency=args.with_latency)
 
     #train_sampler = RemoteCacheSampler(train_data)
     
@@ -96,10 +114,11 @@ def train_model():
     
     
     # Set Parameters and Create Model
-    learning_rate = 1
+    learning_rate = .01
     
     model = ConvNet()
     optimizer = optim.Adadelta(model.parameters(), lr=learning_rate)
+    #optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=0.5)
     scheduler = StepLR(optimizer, step_size=1, gamma=0.7)
     
     total_time = AverageMeter()
@@ -179,8 +198,6 @@ def evaluate_model(model, test_loader, y_test):
             y_pred_list.append(y_test_pred)
             
     y_pred_list = [a.squeeze().tolist() for a in y_pred_list]
-    print(y_test[:10])
-    print(y_pred_list[:10])
     CR = classification_report(y_test, y_pred_list, output_dict=True)
     print(CR)
     print(confusion_matrix(y_test, y_pred_list))

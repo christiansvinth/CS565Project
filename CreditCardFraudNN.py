@@ -15,7 +15,7 @@ from torch.utils.data import TensorDataset, DataLoader
 from sklearn.metrics import classification_report, confusion_matrix
 from LRUCache import *
 from RemoteCache import *
-
+from FastCache import *
 
 CSV_PATH = "data/creditcard.csv"
 
@@ -99,7 +99,7 @@ def train_model():
     
     X_train, X_test, y_train, y_test = train_test_split(X_tensor, y_tensor, test_size=0.2, random_state=1)
     
-    train_data = RemoteCacheDataset(X_train, y_train, eviction_method=args.eviction_method, data_variance=np.var(X))
+    train_data = FastCacheDataset(X_train, y_train, eviction_method=args.eviction_method, data_variance=np.var(X))
     test_data = TensorDataset(X_test)
     train_loader = DataLoader(dataset=train_data, batch_size=minibatch_size)
     
